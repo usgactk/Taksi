@@ -1,0 +1,1056 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"/>
+  <meta name="apple-mobile-web-app-capable" content="yes"/>
+  <meta name="apple-mobile-web-app-title" content="TaksiPRO"/>
+  <title>🚕 TaksiPRO</title>
+  <link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+  <style>
+    html,body{margin:0;padding:0;background:#fff;}
+    *{box-sizing:border-box;}
+    #root{min-height:100vh;}
+    #ld{display:flex;align-items:center;justify-content:center;height:100vh;flex-direction:column;gap:12px;font-family:sans-serif;color:#999;font-size:13px;}
+    .sp{width:28px;height:28px;border:3px solid #eee;border-top-color:#111;border-radius:50%;animation:sp .7s linear infinite;}
+    @keyframes sp{to{transform:rotate(360deg)}}
+  </style>
+</head>
+<body>
+<div id="root"><div id="ld"><div class="sp"></div>Yükleniyor…</div></div>
+<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/recharts@2.12.7/umd/Recharts.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<script type="text/babel" data-presets="react">
+const { useState, useEffect, useRef, useCallback } = React;
+const { BarChart, Bar, LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell } = Recharts;
+
+
+// ─── STORAGE HELPERS ──────────────────────────────────────────────────────────
+const STORE_KEY = "taksi_pro_v2";
+function loadStore() {
+  try { return JSON.parse(localStorage.getItem(STORE_KEY) || "null"); } catch { return null; }
+}
+function saveStore(data) {
+  try { localStorage.setItem(STORE_KEY, JSON.stringify(data)); } catch {}
+}
+
+// ─── DEFAULTS ─────────────────────────────────────────────────────────────────
+const defaultProfile = {
+  plaka: "34 ABC 123",
+  malSahipOran: 50,
+  yovmiyeOran: 10, // cironun %X'i
+  siforler: [{ id: 1, ad: "Şoför 1", telefon: "" }],
+  aktifSifor: 1,
+};
+
+const defaultState = {
+  profile: defaultProfile,
+  seferler: [],
+  giderler: [],
+  borclar: [],
+  vardiya: "gunduz",
+  vardiyaBaslangicKm: "",
+  vardiyaBitisKm: "",
+  rotaGecmisi: [],
+};
+
+// ─── UTILS ────────────────────────────────────────────────────────────────────
+function formatTL(v) {
+  const n = parseFloat(v) || 0;
+  return n.toLocaleString("tr-TR", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + " ₺";
+}
+function simdi() {
+  return new Date().toLocaleTimeString("tr-TR", { hour: "2-digit", minute: "2-digit" });
+}
+function bugun() {
+  return new Date().toISOString().split("T")[0];
+}
+function haftaNo(d) {
+  const date = new Date(d);
+  const jan1 = new Date(date.getFullYear(), 0, 1);
+  return Math.ceil(((date - jan1) / 86400000 + jan1.getDay() + 1) / 7);
+}
+function ayAd(m) {
+  return ["Oca","Şub","Mar","Nis","May","Haz","Tem","Ağu","Eyl","Eki","Kas","Ara"][m];
+}
+function tarihGoster(iso) {
+  if (!iso) return "";
+  const d = new Date(iso);
+  return d.toLocaleDateString("tr-TR", { day: "numeric", month: "short" });
+}
+
+// ─── MAIN APP ─────────────────────────────────────────────────────────────────
+function App() {
+  const [store, setStore] = useState(() => {
+    const saved = loadStore();
+    return saved ? { ...defaultState, ...saved, profile: { ...defaultProfile, ...(saved.profile || {}) } } : defaultState;
+  });
+  const [tab, setTab] = useState("isler");
+  const [modal, setModal] = useState(null); // null | 'sefer' | 'gider' | 'borc' | 'profil' | 'sifor'
+
+  // Persist
+  useEffect(() => { saveStore(store); }, [store]);
+
+  const update = useCallback((fn) => setStore(prev => { const next = { ...prev }; fn(next); return { ...next }; }), []);
+
+  // Derived
+  const bugunSeferler = store.seferler.filter(s => s.tarih === bugun() && s.siforId === store.profile.aktifSifor);
+  const bugunGiderler = store.giderler.filter(g => g.tarih === bugun() && g.siforId === store.profile.aktifSifor);
+
+  const toplamHasilat = bugunSeferler.reduce((s, x) => s + (parseFloat(x.tutar) || 0), 0);
+  const toplamGider = bugunGiderler.reduce((s, x) => s + (parseFloat(x.tutar) || 0), 0);
+  const yovmiye = toplamHasilat * (store.profile.yovmiyeOran / 100);
+  const netKazanc = toplamHasilat - toplamGider - yovmiye;
+  const malSahipPay = netKazanc > 0 ? netKazanc * (store.profile.malSahipOran / 100) : 0;
+  const siforuPay = netKazanc > 0 ? netKazanc - malSahipPay : 0;
+  const nakitHasilat = bugunSeferler.filter(s => s.odeme === "nakit").reduce((s, x) => s + (parseFloat(x.tutar) || 0), 0);
+  const kartHasilat = bugunSeferler.filter(s => s.odeme === "kart").reduce((s, x) => s + (parseFloat(x.tutar) || 0), 0);
+
+  const aktifSifor = store.profile.siforler?.find(s => s.id === store.profile.aktifSifor) || store.profile.siforler?.[0];
+
+  const tabs = [
+    { id: "isler", label: "İşler", icon: "🚕" },
+    { id: "giderler", label: "Giderler", icon: "💸" },
+    { id: "rapor", label: "Rapor", icon: "📈" },
+    { id: "hesap", label: "Hesap", icon: "🧾" },
+    { id: "profil", label: "Profil", icon: "⚙️" },
+  ];
+
+  return (
+    <div style={S.root}>
+      <style>{`
+        @import url('https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap');
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        input[type=range] { -webkit-appearance: none; width: 100%; height: 4px; border-radius: 2px; background: #1e293b; outline: none; }
+        input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; width: 18px; height: 18px; border-radius: 50%; background: #fbbf24; cursor: pointer; }
+        input, select { font-family: inherit; }
+        ::-webkit-scrollbar { width: 4px; } ::-webkit-scrollbar-track { background: #0f172a; } ::-webkit-scrollbar-thumb { background: #334155; border-radius: 2px; }
+      `}</style>
+
+      {/* HEADER */}
+      <Header
+        plaka={store.profile.plaka}
+        sifor={aktifSifor}
+        vardiya={store.vardiya}
+        hasilat={toplamHasilat}
+        gider={toplamGider + yovmiye}
+        net={netKazanc}
+        onVardiyaToggle={() => update(s => { s.vardiya = s.vardiya === "gunduz" ? "gece" : "gunduz"; })}
+      />
+
+      {/* TABS */}
+      <div style={S.tabBar}>
+        {tabs.map(t => (
+          <button key={t.id} style={{ ...S.tabBtn, ...(tab === t.id ? S.tabActive : {}) }} onClick={() => setTab(t.id)}>
+            <span style={{ fontSize: 18 }}>{t.icon}</span>
+            <span style={{ fontSize: 10 }}>{t.label}</span>
+          </button>
+        ))}
+      </div>
+
+      {/* CONTENT */}
+      <div style={S.content}>
+        {tab === "isler" && <IslerTab store={store} update={update} bugunSeferler={bugunSeferler} onAdd={() => setModal("sefer")} />}
+        {tab === "giderler" && <GiderlerTab store={store} update={update} bugunGiderler={bugunGiderler} onAdd={() => setModal("gider")} yovmiye={yovmiye} yovmiyeOran={store.profile.yovmiyeOran} ciro={toplamHasilat} />}
+        {tab === "rapor" && <RaporTab store={store} />}
+        {tab === "hesap" && <HesapTab store={store} update={update} hasilat={toplamHasilat} gider={toplamGider} yovmiye={yovmiye} net={netKazanc} malPay={malSahipPay} siforPay={siforuPay} nakit={nakitHasilat} kart={kartHasilat} />}
+        {tab === "profil" && <ProfilTab store={store} update={update} onAddSifor={() => setModal("sifor")} />}
+      </div>
+
+      {/* MODALS */}
+      {modal === "sefer" && <SeferModal store={store} update={update} onClose={() => setModal(null)} />}
+      {modal === "gider" && <GiderModal store={store} update={update} onClose={() => setModal(null)} />}
+      {modal === "borc" && <BorcModal store={store} update={update} onClose={() => setModal(null)} />}
+      {modal === "sifor" && <SiforModal store={store} update={update} onClose={() => setModal(null)} />}
+      {modal === "profil" && <ProfilModal store={store} update={update} onClose={() => setModal(null)} />}
+    </div>
+  );
+}
+
+// ─── HEADER ───────────────────────────────────────────────────────────────────
+function Header({ plaka, sifor, vardiya, hasilat, gider, net, onVardiyaToggle }) {
+  const isGece = vardiya === "gece";
+  const bg = isGece ? "#111" : "#fff";
+  const border = isGece ? "1px solid #333" : "1px solid #e5e5e5";
+  return (
+    <div style={{ ...S.header, background: bg, borderBottom: border }}>
+      <div style={S.headerRow}>
+        <div>
+          <div style={{ ...S.logo, color: isGece ? "#fff" : "#111" }}>🚕 TaksiPRO</div>
+          <div style={{ ...S.plataBadge, color: isGece ? "#666" : "#888" }}>{plaka} · {sifor?.ad || "Şoför"}</div>
+        </div>
+        <button onClick={onVardiyaToggle} style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 2, border: `1px solid ${isGece ? "#444" : "#ddd"}`, borderRadius: 8, padding: "6px 12px", cursor: "pointer", background: isGece ? "#222" : "#f5f5f5" }}>
+          <span style={{ fontSize: 16 }}>{isGece ? "🌙" : "☀️"}</span>
+          <span style={{ fontSize: 10, color: isGece ? "#aaa" : "#666" }}>{isGece ? "Gece" : "Gündüz"}</span>
+        </button>
+      </div>
+      <div style={S.miniStats}>
+        <MiniStat label="Hasılat" val={formatTL(hasilat)} color="#16a34a" dark={isGece} />
+        <MiniStat label="Gider" val={formatTL(gider)} color="#dc2626" dark={isGece} />
+        <MiniStat label="Net" val={formatTL(net)} color={isGece ? "#fff" : "#111"} dark={isGece} />
+      </div>
+    </div>
+  );
+}
+
+function MiniStat({ label, val, color, dark }) {
+  return (
+    <div style={{ flex: 1, textAlign: "center", padding: "8px 4px", background: dark ? "#222" : "#f5f5f5", borderRadius: 8, border: `1px solid ${dark ? "#333" : "#e0e0e0"}` }}>
+      <div style={{ color, fontSize: 13, fontWeight: 800, fontFamily: "'JetBrains Mono',monospace" }}>{val}</div>
+      <div style={{ color: dark ? "#666" : "#999", fontSize: 10 }}>{label}</div>
+    </div>
+  );
+}
+
+// ─── İŞLER TAB ────────────────────────────────────────────────────────────────
+function IslerTab({ store, update, bugunSeferler, onAdd }) {
+  const [gpsAktif, setGpsAktif] = useState(false);
+  const [gpsKonum, setGpsKonum] = useState(null);
+  const watchRef = useRef(null);
+
+  function toggleGps() {
+    if (!gpsAktif) {
+      if (!navigator.geolocation) { alert("GPS desteklenmiyor"); return; }
+      watchRef.current = navigator.geolocation.watchPosition(
+        pos => {
+          const konum = { lat: pos.coords.latitude, lng: pos.coords.longitude, zaman: simdi() };
+          setGpsKonum(konum);
+          update(s => { s.rotaGecmisi = [...(s.rotaGecmisi || []).slice(-99), konum]; });
+        },
+        () => {},
+        { enableHighAccuracy: true }
+      );
+      setGpsAktif(true);
+    } else {
+      if (watchRef.current) navigator.geolocation.clearWatch(watchRef.current);
+      setGpsAktif(false);
+    }
+  }
+
+  function sil(id) {
+    update(s => { s.seferler = s.seferler.filter(x => x.id !== id); });
+  }
+
+  return (
+    <div>
+      <div style={S.actionRow}>
+        <div>
+          <div style={S.secTitle}>Bugünkü Seferler</div>
+          <div style={{ fontSize: 11, color: "#64748b" }}>{bugunSeferler.length} sefer · {formatTL(bugunSeferler.reduce((s, x) => s + (parseFloat(x.tutar) || 0), 0))}</div>
+        </div>
+        <div style={{ display: "flex", gap: 8 }}>
+          <button onClick={toggleGps} style={{ ...S.gpsBtn, background: gpsAktif ? "#10b98133" : "#1e293b", borderColor: gpsAktif ? "#10b981" : "#334155", color: gpsAktif ? "#10b981" : "#64748b" }}>
+            {gpsAktif ? "📍 Aktif" : "📍 GPS"}
+          </button>
+          <button onClick={onAdd} style={S.addBtn}>+ Sefer</button>
+        </div>
+      </div>
+
+      {gpsAktif && gpsKonum && (
+        <div style={S.gpsBanner}>
+          <span style={{ color: "#10b981" }}>📡 Konum takip aktif</span>
+          <span style={{ color: "#64748b", fontSize: 11 }}>{gpsKonum.lat.toFixed(4)}, {gpsKonum.lng.toFixed(4)} · {gpsKonum.zaman}</span>
+        </div>
+      )}
+
+      {/* KM Bilgisi */}
+      <KmSatiri store={store} update={update} />
+
+      {bugunSeferler.length === 0 && <Empty text="Henüz sefer yok" />}
+
+      {[...bugunSeferler].reverse().map((s, i) => (
+        <SeferKart key={s.id} sefer={s} no={bugunSeferler.length - i} onSil={() => sil(s.id)} />
+      ))}
+    </div>
+  );
+}
+
+function KmSatiri({ store, update }) {
+  return (
+    <div style={S.kmCard}>
+      <div style={{ display: "flex", gap: 10 }}>
+        <div style={{ flex: 1 }}>
+          <div style={S.kmLabel}>🔑 Başlangıç KM</div>
+          <input type="number" placeholder="000000" style={S.kmInput}
+            value={store.vardiyaBaslangicKm}
+            onChange={e => update(s => { s.vardiyaBaslangicKm = e.target.value; })} />
+        </div>
+        <div style={{ flex: 1 }}>
+          <div style={S.kmLabel}>🏁 Bitiş KM</div>
+          <input type="number" placeholder="000000" style={S.kmInput}
+            value={store.vardiyaBitisKm}
+            onChange={e => update(s => { s.vardiyaBitisKm = e.target.value; })} />
+        </div>
+        <div style={{ flex: 1 }}>
+          <div style={S.kmLabel}>📏 Mesafe</div>
+          <div style={{ ...S.kmInput, display: "flex", alignItems: "center", color: "#fbbf24", fontWeight: 700 }}>
+            {store.vardiyaBitisKm && store.vardiyaBaslangicKm
+              ? (parseFloat(store.vardiyaBitisKm) - parseFloat(store.vardiyaBaslangicKm)).toFixed(0) + " km"
+              : "— km"}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function SeferKart({ sefer, no, onSil }) {
+  return (
+    <div style={S.seferCard}>
+      <div style={S.seferNo}>#{no}</div>
+      <div style={{ flex: 1 }}>
+        <div style={S.seferRow}>
+          <span style={S.seferSaat}>{sefer.saat}</span>
+          <span style={sefer.odeme === "nakit" ? S.nakitBadge : S.kartBadge}>
+            {sefer.odeme === "nakit" ? "💵 Nakit" : "💳 Kart"}
+          </span>
+        </div>
+        {sefer.aciklama && <div style={S.seferAcik}>{sefer.aciklama}</div>}
+        {(sefer.baslKm || sefer.bitisKm) && (
+          <div style={S.seferKm}>{sefer.baslKm} → {sefer.bitisKm} km</div>
+        )}
+      </div>
+      <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 6 }}>
+        <div style={S.seferTutar}>{formatTL(sefer.tutar)}</div>
+        <button onClick={onSil} style={S.silBtn}>✕</button>
+      </div>
+    </div>
+  );
+}
+
+// ─── GİDERLER TAB ─────────────────────────────────────────────────────────────
+const GIDER_TIPS = {
+  yakit: { label: "Yakıt", emoji: "⛽", color: "#f97316" },
+  yemek: { label: "Yemek", emoji: "🍽️", color: "#10b981" },
+  masraf: { label: "Masraf", emoji: "🔧", color: "#ef4444" },
+  diger: { label: "Diğer", emoji: "📦", color: "#8b5cf6" },
+};
+
+function GiderlerTab({ store, update, bugunGiderler, onAdd, yovmiye, yovmiyeOran, ciro }) {
+  function sil(id) { update(s => { s.giderler = s.giderler.filter(x => x.id !== id); }); }
+
+  return (
+    <div>
+      <div style={S.actionRow}>
+        <div>
+          <div style={S.secTitle}>Giderler</div>
+          <div style={{ fontSize: 11, color: "#64748b" }}>{bugunGiderler.length} kalem</div>
+        </div>
+        <button onClick={onAdd} style={S.addBtn}>+ Gider</button>
+      </div>
+
+      {/* Yövmiye bilgi kartı */}
+      <div style={S.yovmiyeCard}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <div>
+            <div style={{ color: "#a78bfa", fontSize: 13, fontWeight: 700 }}>👷 Yövmiye (Cironun %{yovmiyeOran})</div>
+            <div style={{ color: "#64748b", fontSize: 11, marginTop: 2 }}>Ciro: {formatTL(ciro)}</div>
+          </div>
+          <div style={{ color: "#a78bfa", fontSize: 18, fontWeight: 800, fontFamily: "'JetBrains Mono',monospace" }}>{formatTL(yovmiye)}</div>
+        </div>
+      </div>
+
+      {bugunGiderler.length === 0 && <Empty text="Henüz gider yok" />}
+
+      {[...bugunGiderler].reverse().map(g => {
+        const tip = GIDER_TIPS[g.tip] || GIDER_TIPS.diger;
+        return (
+          <div key={g.id} style={S.giderCard}>
+            <div style={{ ...S.giderEmoji, background: tip.color + "22" }}>{tip.emoji}</div>
+            <div style={{ flex: 1 }}>
+              <div style={{ color: tip.color, fontSize: 13, fontWeight: 700 }}>{tip.label}</div>
+              {g.aciklama && <div style={S.seferAcik}>{g.aciklama}</div>}
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 6 }}>
+              <div style={{ color: "#ef4444", fontWeight: 800, fontFamily: "'JetBrains Mono',monospace" }}>-{formatTL(g.tutar)}</div>
+              <button onClick={() => sil(g.id)} style={S.silBtn}>✕</button>
+            </div>
+          </div>
+        );
+      })}
+
+      {/* Borç/Alacak */}
+      <BorcAlacakPanel store={store} update={update} />
+    </div>
+  );
+}
+
+function BorcAlacakPanel({ store, update }) {
+  const [show, setShow] = useState(false);
+  const [form, setForm] = useState({ tip: "borc", kisi: "", tutar: "", aciklama: "", tarih: bugun() });
+
+  function ekle() {
+    if (!form.tutar || !form.kisi) return;
+    update(s => { s.borclar = [...(s.borclar || []), { ...form, id: Date.now(), odendi: false }]; });
+    setForm({ tip: "borc", kisi: "", tutar: "", aciklama: "", tarih: bugun() });
+    setShow(false);
+  }
+  function odendiToggle(id) {
+    update(s => { s.borclar = s.borclar.map(b => b.id === id ? { ...b, odendi: !b.odendi } : b); });
+  }
+  function sil(id) { update(s => { s.borclar = s.borclar.filter(b => b.id !== id); }); }
+
+  const borclar = (store.borclar || []).filter(b => !b.odendi);
+
+  return (
+    <div style={{ marginTop: 16 }}>
+      <div style={S.actionRow}>
+        <div style={S.secTitle}>Borç / Alacak ({borclar.length})</div>
+        <button onClick={() => setShow(v => !v)} style={{ ...S.addBtn, background: "#1e293b", color: "#fbbf24", border: "1px solid #334155" }}>
+          {show ? "✕" : "+ Ekle"}
+        </button>
+      </div>
+      {show && (
+        <div style={S.formCard}>
+          <div style={S.row2}>
+            <div>
+              <div style={S.label}>Tip</div>
+              <select style={S.select} value={form.tip} onChange={e => setForm(f => ({ ...f, tip: e.target.value }))}>
+                <option value="borc">🔴 Borç (Ödenecek)</option>
+                <option value="alacak">🟢 Alacak (Alınacak)</option>
+              </select>
+            </div>
+            <div>
+              <div style={S.label}>Kişi/Kurum</div>
+              <input style={S.input} placeholder="Ad..." value={form.kisi} onChange={e => setForm(f => ({ ...f, kisi: e.target.value }))} />
+            </div>
+          </div>
+          <div style={S.row2}>
+            <div>
+              <div style={S.label}>Tutar (₺)</div>
+              <input type="number" style={S.input} placeholder="0.00" value={form.tutar} onChange={e => setForm(f => ({ ...f, tutar: e.target.value }))} />
+            </div>
+            <div>
+              <div style={S.label}>Not</div>
+              <input style={S.input} placeholder="Opsiyonel" value={form.aciklama} onChange={e => setForm(f => ({ ...f, aciklama: e.target.value }))} />
+            </div>
+          </div>
+          <button onClick={ekle} style={S.saveBtn}>✓ Kaydet</button>
+        </div>
+      )}
+      {(store.borclar || []).map(b => (
+        <div key={b.id} style={{ ...S.borcItem, opacity: b.odendi ? 0.4 : 1, borderColor: b.tip === "borc" ? "#ef444444" : "#10b98144" }}>
+          <div style={{ flex: 1 }}>
+            <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+              <span style={{ fontSize: 10, background: b.tip === "borc" ? "#ef444422" : "#10b98122", color: b.tip === "borc" ? "#ef4444" : "#10b981", borderRadius: 4, padding: "2px 6px", fontWeight: 700 }}>
+                {b.tip === "borc" ? "BORÇ" : "ALACAK"}
+              </span>
+              <span style={{ color: "#e2e8f0", fontSize: 13 }}>{b.kisi}</span>
+            </div>
+            {b.aciklama && <div style={{ color: "#64748b", fontSize: 11, marginTop: 2 }}>{b.aciklama}</div>}
+            <div style={{ color: "#475569", fontSize: 10, marginTop: 2 }}>{b.tarih}</div>
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 6 }}>
+            <div style={{ color: b.tip === "borc" ? "#ef4444" : "#10b981", fontWeight: 800, fontFamily: "'JetBrains Mono',monospace", fontSize: 14 }}>{formatTL(b.tutar)}</div>
+            <div style={{ display: "flex", gap: 4 }}>
+              <button onClick={() => odendiToggle(b.id)} style={{ ...S.silBtn, background: "#10b98122", color: "#10b981", fontSize: 10 }}>{b.odendi ? "↺" : "✓"}</button>
+              <button onClick={() => sil(b.id)} style={S.silBtn}>✕</button>
+            </div>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// ─── RAPOR TAB ────────────────────────────────────────────────────────────────
+function RaporTab({ store }) {
+  const [periyot, setPeriyot] = useState("gunluk");
+
+  // Günlük veri (son 7 gün)
+  const son7gun = Array.from({ length: 7 }, (_, i) => {
+    const d = new Date(); d.setDate(d.getDate() - (6 - i));
+    const iso = d.toISOString().split("T")[0];
+    const seferler = store.seferler.filter(s => s.tarih === iso);
+    const giderler = store.giderler.filter(g => g.tarih === iso);
+    const hasilat = seferler.reduce((s, x) => s + (parseFloat(x.tutar) || 0), 0);
+    const gider = giderler.reduce((s, x) => s + (parseFloat(x.tutar) || 0), 0);
+    return { gun: ["Pzt","Sal","Çar","Per","Cum","Cmt","Paz"][d.getDay() === 0 ? 6 : d.getDay() - 1], hasilat, gider, net: hasilat - gider };
+  });
+
+  // Haftalık veri (son 4 hafta)
+  const son4hafta = Array.from({ length: 4 }, (_, i) => {
+    const hedef = new Date(); hedef.setDate(hedef.getDate() - (3 - i) * 7);
+    const hno = haftaNo(hedef.toISOString().split("T")[0]);
+    const yil = hedef.getFullYear();
+    const seferler = store.seferler.filter(s => { const d = new Date(s.tarih); return haftaNo(s.tarih) === hno && d.getFullYear() === yil; });
+    const hasilat = seferler.reduce((s, x) => s + (parseFloat(x.tutar) || 0), 0);
+    return { label: `H${hno}`, hasilat };
+  });
+
+  // Aylık veri (son 6 ay)
+  const son6ay = Array.from({ length: 6 }, (_, i) => {
+    const d = new Date(); d.setMonth(d.getMonth() - (5 - i));
+    const ay = d.getMonth(); const yil = d.getFullYear();
+    const seferler = store.seferler.filter(s => { const sd = new Date(s.tarih); return sd.getMonth() === ay && sd.getFullYear() === yil; });
+    const hasilat = seferler.reduce((s, x) => s + (parseFloat(x.tutar) || 0), 0);
+    return { label: ayAd(ay), hasilat };
+  });
+
+  // En yoğun saatler
+  const saatDagilim = Array.from({ length: 24 }, (_, h) => {
+    const count = store.seferler.filter(s => parseInt(s.saat?.split(":")[0]) === h).length;
+    return { saat: `${h}:00`, count };
+  }).filter(x => x.count > 0);
+
+  const topSaatler = [...saatDagilim].sort((a, b) => b.count - a.count).slice(0, 5);
+
+  // Ortalama günlük gelir
+  const gunler = [...new Set(store.seferler.map(s => s.tarih))];
+  const ortGunluk = gunler.length > 0
+    ? store.seferler.reduce((s, x) => s + (parseFloat(x.tutar) || 0), 0) / gunler.length
+    : 0;
+
+  // PDF rapor
+  function pdfAl() {
+    const bugunSeferler = store.seferler.filter(s => s.tarih === bugun());
+    const hasilat = bugunSeferler.reduce((s, x) => s + (parseFloat(x.tutar) || 0), 0);
+    const giderler = store.giderler.filter(g => g.tarih === bugun());
+    const gider = giderler.reduce((s, x) => s + (parseFloat(x.tutar) || 0), 0);
+    const yov = hasilat * (store.profile.yovmiyeOran / 100);
+    const net = hasilat - gider - yov;
+
+    const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>TaksiPRO Rapor</title>
+    <style>
+      body { font-family: Arial, sans-serif; padding: 30px; color: #222; }
+      h1 { color: #1e40af; } h2 { color: #374151; margin-top: 20px; border-bottom: 1px solid #e5e7eb; }
+      table { width: 100%; border-collapse: collapse; margin-top: 10px; }
+      th { background: #1e40af; color: white; padding: 8px; text-align: left; }
+      td { padding: 7px; border-bottom: 1px solid #e5e7eb; }
+      .total { background: #f0fdf4; font-weight: bold; }
+      .red { color: #dc2626; } .green { color: #16a34a; }
+    </style></head><body>
+    <h1>🚕 TaksiPRO — Günlük Rapor</h1>
+    <p>Plaka: <b>${store.profile.plaka}</b> | Tarih: <b>${new Date().toLocaleDateString("tr-TR")}</b> | Şoför: <b>${store.profile.siforler?.[0]?.ad}</b></p>
+    <h2>Seferler (${bugunSeferler.length} adet)</h2>
+    <table><tr><th>#</th><th>Saat</th><th>Tutar</th><th>Ödeme</th><th>Not</th></tr>
+    ${bugunSeferler.map((s, i) => `<tr><td>${i + 1}</td><td>${s.saat}</td><td>${formatTL(s.tutar)}</td><td>${s.odeme}</td><td>${s.aciklama || ""}</td></tr>`).join("")}
+    </table>
+    <h2>Hesap Özeti</h2>
+    <table>
+      <tr><td>Toplam Hasılat</td><td class="green">${formatTL(hasilat)}</td></tr>
+      <tr><td>Giderler</td><td class="red">-${formatTL(gider)}</td></tr>
+      <tr><td>Yövmiye (%${store.profile.yovmiyeOran})</td><td class="red">-${formatTL(yov)}</td></tr>
+      <tr class="total"><td>Net Kazanç</td><td class="green">${formatTL(net)}</td></tr>
+      <tr><td>Mal Sahibi Payı (%${store.profile.malSahipOran})</td><td class="red">-${formatTL(net * store.profile.malSahipOran / 100)}</td></tr>
+      <tr class="total"><td>Şoför Kalan</td><td class="green">${formatTL(net * (1 - store.profile.malSahipOran / 100))}</td></tr>
+    </table>
+    </body></html>`;
+
+    const w = window.open("", "_blank");
+    w.document.write(html);
+    w.document.close();
+    w.print();
+  }
+
+  const chartData = periyot === "gunluk" ? son7gun : periyot === "haftalik" ? son4hafta : son6ay;
+  const xKey = periyot === "gunluk" ? "gun" : "label";
+
+  return (
+    <div>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+        <div style={S.secTitle}>Raporlar</div>
+        <button onClick={pdfAl} style={{ ...S.addBtn, background: "#1e40af22", color: "#60a5fa", border: "1px solid #1e40af" }}>📄 PDF</button>
+      </div>
+
+      {/* Özet istatistikler */}
+      <div style={S.row2} >
+        <div style={S.statBox}>
+          <div style={{ color: "#fbbf24", fontSize: 18, fontWeight: 800, fontFamily: "'JetBrains Mono',monospace" }}>{formatTL(ortGunluk)}</div>
+          <div style={{ color: "#64748b", fontSize: 11 }}>Ort. Günlük Gelir</div>
+        </div>
+        <div style={S.statBox}>
+          <div style={{ color: "#10b981", fontSize: 18, fontWeight: 800 }}>{store.seferler.length}</div>
+          <div style={{ color: "#64748b", fontSize: 11 }}>Toplam Sefer</div>
+        </div>
+      </div>
+
+      {/* Periyot seçici */}
+      <div style={S.segmented}>
+        {["gunluk", "haftalik", "aylik"].map(p => (
+          <button key={p} onClick={() => setPeriyot(p)} style={{ ...S.segBtn, ...(periyot === p ? S.segActive : {}) }}>
+            {p === "gunluk" ? "Günlük" : p === "haftalik" ? "Haftalık" : "Aylık"}
+          </button>
+        ))}
+      </div>
+
+      <div style={S.chartCard}>
+        <div style={S.chartTitle}>💰 Hasılat Grafiği</div>
+        <ResponsiveContainer width="100%" height={160}>
+          <BarChart data={chartData} margin={{ top: 5, right: 5, left: -20, bottom: 0 }}>
+            <XAxis dataKey={xKey} tick={{ fill: "#64748b", fontSize: 10 }} axisLine={false} tickLine={false} />
+            <YAxis tick={{ fill: "#64748b", fontSize: 10 }} axisLine={false} tickLine={false} tickFormatter={v => v >= 1000 ? (v / 1000).toFixed(1) + "k" : v} />
+            <Tooltip contentStyle={{ background: "#1e293b", border: "1px solid #334155", borderRadius: 8, color: "#e2e8f0" }} formatter={v => formatTL(v)} />
+            <Bar dataKey="hasilat" fill="#fbbf24" radius={[4, 4, 0, 0]}>
+              {chartData.map((_, i) => <Cell key={i} fill={i === chartData.length - 1 ? "#fbbf24" : "#fbbf2466"} />)}
+            </Bar>
+          </BarChart>
+        </ResponsiveContainer>
+      </div>
+
+      {periyot === "gunluk" && (
+        <div style={S.chartCard}>
+          <div style={S.chartTitle}>📊 Net Kazanç (7 Gün)</div>
+          <ResponsiveContainer width="100%" height={140}>
+            <LineChart data={son7gun} margin={{ top: 5, right: 5, left: -20, bottom: 0 }}>
+              <XAxis dataKey="gun" tick={{ fill: "#64748b", fontSize: 10 }} axisLine={false} tickLine={false} />
+              <YAxis tick={{ fill: "#64748b", fontSize: 10 }} axisLine={false} tickLine={false} tickFormatter={v => v >= 1000 ? (v / 1000).toFixed(1) + "k" : v} />
+              <Tooltip contentStyle={{ background: "#1e293b", border: "1px solid #334155", borderRadius: 8, color: "#e2e8f0" }} formatter={v => formatTL(v)} />
+              <Line type="monotone" dataKey="net" stroke="#10b981" strokeWidth={2} dot={{ fill: "#10b981", r: 3 }} />
+            </LineChart>
+          </ResponsiveContainer>
+        </div>
+      )}
+
+      {/* En yoğun saatler */}
+      {topSaatler.length > 0 && (
+        <div style={S.chartCard}>
+          <div style={S.chartTitle}>⏰ En Yoğun Saatler</div>
+          {topSaatler.map((s, i) => (
+            <div key={i} style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 8 }}>
+              <div style={{ color: "#fbbf24", fontSize: 12, fontFamily: "'JetBrains Mono',monospace", minWidth: 44 }}>{s.saat}</div>
+              <div style={{ flex: 1, background: "#1e293b", borderRadius: 4, height: 8, overflow: "hidden" }}>
+                <div style={{ width: `${(s.count / topSaatler[0].count) * 100}%`, height: "100%", background: i === 0 ? "#fbbf24" : "#fbbf2466", borderRadius: 4 }} />
+              </div>
+              <div style={{ color: "#94a3b8", fontSize: 12, minWidth: 24 }}>{s.count}</div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── HESAP TAB ────────────────────────────────────────────────────────────────
+function HesapTab({ store, update, hasilat, gider, yovmiye, net, malPay, siforPay, nakit, kart }) {
+
+  function pdfAl() {
+    const bugunSeferler = store.seferler.filter(s => s.tarih === bugun() && s.siforId === store.profile.aktifSifor);
+    const bugunGiderler = store.giderler.filter(g => g.tarih === bugun() && g.siforId === store.profile.aktifSifor);
+    const aktifSifor = store.profile.siforler?.find(s => s.id === store.profile.aktifSifor);
+    const tarihStr = new Date().toLocaleDateString("tr-TR", { day: "numeric", month: "long", year: "numeric", weekday: "long" });
+
+    const html = `<!DOCTYPE html><html lang="tr"><head><meta charset="utf-8">
+    <title>TaksiPRO — Günlük Rapor</title>
+    <style>
+      @page { margin: 20mm; }
+      body { font-family: Arial, sans-serif; color: #111; font-size: 13px; }
+      h1 { font-size: 22px; margin: 0 0 4px; }
+      .sub { color: #888; font-size: 12px; margin-bottom: 20px; }
+      h2 { font-size: 14px; font-weight: 700; border-bottom: 2px solid #111; padding-bottom: 4px; margin: 20px 0 8px; }
+      table { width: 100%; border-collapse: collapse; }
+      th { background: #111; color: #fff; padding: 7px 10px; text-align: left; font-size: 12px; }
+      td { padding: 7px 10px; border-bottom: 1px solid #eee; font-size: 12px; }
+      tr:nth-child(even) td { background: #f9f9f9; }
+      .sum-table td { padding: 8px 10px; font-size: 13px; }
+      .sum-table .lbl { color: #555; }
+      .sum-table .val { text-align: right; font-weight: 700; font-family: monospace; }
+      .green { color: #16a34a; } .red { color: #dc2626; } .bold { font-weight: 800; font-size: 15px; }
+      .divrow td { border-top: 2px solid #111; background: #f0f0f0 !important; }
+      .pay-grid { display: flex; gap: 16px; margin-top: 16px; }
+      .pay-box { flex: 1; border: 2px solid #111; border-radius: 8px; padding: 14px; text-align: center; }
+      .pay-box .amt { font-size: 22px; font-weight: 800; font-family: monospace; margin: 6px 0; }
+      .pay-box .lbl { font-size: 11px; color: #888; }
+      .footer { margin-top: 30px; color: #aaa; font-size: 10px; text-align: center; border-top: 1px solid #eee; padding-top: 10px; }
+    </style></head><body>
+    <h1>🚕 TaksiPRO — Günlük Rapor</h1>
+    <div class="sub">${tarihStr} &nbsp;|&nbsp; Plaka: <b>${store.profile.plaka}</b> &nbsp;|&nbsp; Şoför: <b>${aktifSifor?.ad || "—"}</b> &nbsp;|&nbsp; Vardiya: <b>${store.vardiya === "gece" ? "🌙 Gece" : "☀️ Gündüz"}</b></div>
+
+    <h2>Seferler (${bugunSeferler.length} adet)</h2>
+    <table>
+      <tr><th>#</th><th>Saat</th><th>Ödeme</th><th>Başl. KM</th><th>Bitiş KM</th><th>Not</th><th style="text-align:right">Tutar</th></tr>
+      ${bugunSeferler.map((s, i) => `<tr><td>${i + 1}</td><td>${s.saat || "—"}</td><td>${s.odeme === "nakit" ? "Nakit" : "Kart"}</td><td>${s.baslKm || "—"}</td><td>${s.bitisKm || "—"}</td><td>${s.aciklama || "—"}</td><td style="text-align:right;font-family:monospace;font-weight:700">${formatTL(s.tutar)}</td></tr>`).join("")}
+      <tr style="background:#f0f0f0"><td colspan="6" style="font-weight:700">TOPLAM</td><td style="text-align:right;font-family:monospace;font-weight:800">${formatTL(hasilat)}</td></tr>
+    </table>
+
+    <h2>Giderler</h2>
+    <table>
+      <tr><th>Tip</th><th>Not</th><th style="text-align:right">Tutar</th></tr>
+      ${bugunGiderler.map(g => `<tr><td>${g.tip}</td><td>${g.aciklama || "—"}</td><td style="text-align:right;font-family:monospace;color:#dc2626">-${formatTL(g.tutar)}</td></tr>`).join("")}
+      <tr><td colspan="2"><b>Yövmiye (%${store.profile.yovmiyeOran} ciro)</b></td><td style="text-align:right;font-family:monospace;color:#dc2626">-${formatTL(yovmiye)}</td></tr>
+    </table>
+
+    <h2>Hesap Özeti</h2>
+    <table class="sum-table">
+      <tr><td class="lbl">Nakit Hasılat</td><td class="val green">${formatTL(nakit)}</td></tr>
+      <tr><td class="lbl">Kart Hasılat</td><td class="val green">${formatTL(kart)}</td></tr>
+      <tr><td class="lbl">Toplam Hasılat</td><td class="val green bold">${formatTL(hasilat)}</td></tr>
+      <tr><td class="lbl">Giderler</td><td class="val red">-${formatTL(gider)}</td></tr>
+      <tr><td class="lbl">Yövmiye (%${store.profile.yovmiyeOran})</td><td class="val red">-${formatTL(yovmiye)}</td></tr>
+      <tr class="divrow"><td class="lbl bold">Net Kazanç</td><td class="val green bold">${formatTL(net)}</td></tr>
+    </table>
+
+    <div class="pay-grid">
+      <div class="pay-box">
+        <div class="lbl">🏠 Mal Sahibine (%${store.profile.malSahipOran})</div>
+        <div class="amt red">${formatTL(malPay)}</div>
+      </div>
+      <div class="pay-box">
+        <div class="lbl">🧑‍✈️ Şoföre Kalan (%${100 - store.profile.malSahipOran})</div>
+        <div class="amt green">${formatTL(siforPay)}</div>
+      </div>
+    </div>
+
+    <div class="footer">TaksiPRO &nbsp;·&nbsp; Rapor oluşturma: ${new Date().toLocaleString("tr-TR")}</div>
+    </body></html>`;
+
+    const w = window.open("", "_blank");
+    if (!w) { alert("Lütfen açılır pencere engelini kaldırın."); return; }
+    w.document.write(html);
+    w.document.close();
+    setTimeout(() => w.print(), 500);
+  }
+
+  return (
+    <div>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+        <div style={S.secTitle}>Günlük Hesap Özeti</div>
+        <button onClick={pdfAl} style={{ background: "#111", color: "#fff", border: "none", borderRadius: 8, padding: "7px 14px", fontSize: 12, fontWeight: 700, cursor: "pointer", display: "flex", alignItems: "center", gap: 6 }}>
+          📄 PDF Al
+        </button>
+      </div>
+
+      <div style={S.hesapCard}>
+        <HRow label="Toplam Hasılat" val={formatTL(hasilat)} color="#10b981" bold />
+        <HRow label="  └ Nakit" val={formatTL(nakit)} color="#fbbf24" />
+        <HRow label="  └ Kart" val={formatTL(kart)} color="#60a5fa" />
+        <div style={S.hr} />
+        <HRow label={`Yövmiye (%${store.profile.yovmiyeOran} ciro)`} val={`-${formatTL(yovmiye)}`} color="#a78bfa" />
+        <HRow label="Diğer Giderler" val={`-${formatTL(gider)}`} color="#ef4444" />
+        <div style={S.hr} />
+        <HRow label="Net Kazanç" val={formatTL(net)} color="#fbbf24" bold />
+        <div style={S.hr} />
+        <HRow label={`Mal Sahibi Payı (%${store.profile.malSahipOran})`} val={`-${formatTL(malPay)}`} color="#ef4444" />
+        <HRow label="Şoföre Kalan" val={formatTL(siforPay)} color="#10b981" bold />
+      </div>
+
+      <div style={S.payGrid}>
+        <div style={{ ...S.payBox, borderColor: "#ef4444" }}>
+          <div style={{ fontSize: 24 }}>🏠</div>
+          <div style={{ color: "#94a3b8", fontSize: 11, margin: "4px 0" }}>Mal Sahibine</div>
+          <div style={{ color: "#ef4444", fontWeight: 800, fontSize: 16, fontFamily: "'JetBrains Mono',monospace" }}>{formatTL(malPay)}</div>
+          <div style={{ color: "#475569", fontSize: 10 }}>%{store.profile.malSahipOran}</div>
+        </div>
+        <div style={{ ...S.payBox, borderColor: "#10b981" }}>
+          <div style={{ fontSize: 24 }}>🧑‍✈️</div>
+          <div style={{ color: "#94a3b8", fontSize: 11, margin: "4px 0" }}>Şoföre Kalan</div>
+          <div style={{ color: "#10b981", fontWeight: 800, fontSize: 16, fontFamily: "'JetBrains Mono',monospace" }}>{formatTL(siforPay)}</div>
+          <div style={{ color: "#475569", fontSize: 10 }}>%{100 - store.profile.malSahipOran}</div>
+        </div>
+      </div>
+
+      <div style={S.nakit_kutu}>
+        <div style={{ color: "#fbbf24", fontWeight: 700, fontSize: 13, marginBottom: 8 }}>💰 Kasa Durumu</div>
+        <div style={{ display: "flex", justifyContent: "space-between", padding: "5px 0", borderBottom: "1px solid #1e293b" }}>
+          <span style={{ color: "#94a3b8", fontSize: 13 }}>Elde Nakit</span>
+          <span style={{ color: "#fbbf24", fontWeight: 700, fontFamily: "'JetBrains Mono',monospace" }}>{formatTL(nakit)}</span>
+        </div>
+        <div style={{ display: "flex", justifyContent: "space-between", padding: "5px 0" }}>
+          <span style={{ color: "#94a3b8", fontSize: 13 }}>Kart Tahsilat</span>
+          <span style={{ color: "#60a5fa", fontWeight: 700, fontFamily: "'JetBrains Mono',monospace" }}>{formatTL(kart)}</span>
+        </div>
+      </div>
+
+      <button onClick={() => { if (window.confirm("Bugünkü tüm veriler silinecek!")) { update(s => { const today = bugun(); const id = s.profile.aktifSifor; s.seferler = s.seferler.filter(x => !(x.tarih === today && x.siforId === id)); s.giderler = s.giderler.filter(x => !(x.tarih === today && x.siforId === id)); s.vardiyaBaslangicKm = ""; s.vardiyaBitisKm = ""; }); } }} style={S.resetBtn}>
+        ↺ Günü Sıfırla
+      </button>
+    </div>
+  );
+}
+
+function HRow({ label, val, color, bold }) {
+  return (
+    <div style={{ display: "flex", justifyContent: "space-between", padding: "6px 0" }}>
+      <span style={{ color: bold ? "#e2e8f0" : "#94a3b8", fontSize: bold ? 14 : 13, fontWeight: bold ? 700 : 400 }}>{label}</span>
+      <span style={{ color, fontSize: bold ? 15 : 13, fontWeight: bold ? 800 : 500, fontFamily: "'JetBrains Mono',monospace" }}>{val}</span>
+    </div>
+  );
+}
+
+// ─── PROFİL TAB ───────────────────────────────────────────────────────────────
+function ProfilTab({ store, update, onAddSifor }) {
+  return (
+    <div>
+      <div style={S.secTitle}>Araç ve Şoför Ayarları</div>
+
+      <div style={S.formCard}>
+        <div style={S.label}>🚗 Plaka</div>
+        <input style={S.input} value={store.profile.plaka}
+          onChange={e => update(s => { s.profile.plaka = e.target.value; })} />
+
+        <div style={{ ...S.label, marginTop: 12 }}>🏠 Mal Sahibi Payı: %{store.profile.malSahipOran}</div>
+        <input type="range" min={0} max={100} step={5} value={store.profile.malSahipOran}
+          onChange={e => update(s => { s.profile.malSahipOran = Number(e.target.value); })} />
+        <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11, color: "#64748b", marginTop: 4 }}>
+          <span>Mal Sahibi: %{store.profile.malSahipOran}</span>
+          <span>Şoför: %{100 - store.profile.malSahipOran}</span>
+        </div>
+
+        <div style={{ ...S.label, marginTop: 12 }}>👷 Yövmiye Oranı (Cirodan): %{store.profile.yovmiyeOran}</div>
+        <input type="range" min={0} max={50} step={1} value={store.profile.yovmiyeOran}
+          onChange={e => update(s => { s.profile.yovmiyeOran = Number(e.target.value); })} />
+        <div style={{ textAlign: "right", fontSize: 11, color: "#a78bfa", marginTop: 4 }}>
+          %{store.profile.yovmiyeOran} cirodan düşülür
+        </div>
+      </div>
+
+      <div style={S.actionRow}>
+        <div style={S.secTitle}>Şoförler</div>
+        <button onClick={onAddSifor} style={S.addBtn}>+ Şoför</button>
+      </div>
+
+      {(store.profile.siforler || []).map(sf => (
+        <div key={sf.id} style={{ ...S.seferCard, borderColor: sf.id === store.profile.aktifSifor ? "#fbbf24" : "#334155" }}>
+          <div style={{ fontSize: 24 }}>🧑‍✈️</div>
+          <div style={{ flex: 1 }}>
+            <div style={{ color: "#e2e8f0", fontWeight: 700 }}>{sf.ad}</div>
+            {sf.telefon && <div style={{ color: "#64748b", fontSize: 12 }}>{sf.telefon}</div>}
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+            {sf.id !== store.profile.aktifSifor && (
+              <button onClick={() => update(s => { s.profile.aktifSifor = sf.id; })} style={{ ...S.saveBtn, fontSize: 11, padding: "5px 10px" }}>Seç</button>
+            )}
+            {sf.id === store.profile.aktifSifor && <span style={{ color: "#fbbf24", fontSize: 11, fontWeight: 700 }}>✓ Aktif</span>}
+            {(store.profile.siforler || []).length > 1 && (
+              <button onClick={() => update(s => { s.profile.siforler = s.profile.siforler.filter(x => x.id !== sf.id); })} style={S.silBtn}>✕</button>
+            )}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// ─── MODALS ───────────────────────────────────────────────────────────────────
+function Modal({ title, onClose, children }) {
+  return (
+    <div style={S.overlay} onClick={e => e.target === e.currentTarget && onClose()}>
+      <div style={S.modalBox}>
+        <div style={S.modalHeader}>
+          <div style={{ fontWeight: 800, fontSize: 16 }}>{title}</div>
+          <button onClick={onClose} style={S.closeBtn}>✕</button>
+        </div>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+function SeferModal({ store, update, onClose }) {
+  const [form, setForm] = useState({
+    tutar: "", odeme: "nakit", aciklama: "",
+    baslKm: "", bitisKm: "",
+    saat: simdi(), tarih: bugun(),
+    siforId: store.profile.aktifSifor,
+  });
+  function kaydet() {
+    if (!form.tutar || parseFloat(form.tutar) <= 0) return;
+    update(s => { s.seferler = [...s.seferler, { ...form, id: Date.now() }]; });
+    onClose();
+  }
+  return (
+    <Modal title="🚕 Yeni Sefer" onClose={onClose}>
+      <div style={S.row2}>
+        <div>
+          <div style={S.label}>Tutar (₺) *</div>
+          <input type="number" inputMode="decimal" placeholder="0.00" style={S.input} value={form.tutar}
+            onChange={e => setForm(f => ({ ...f, tutar: e.target.value }))} autoFocus />
+        </div>
+        <div>
+          <div style={S.label}>Saat (Otomatik)</div>
+          <input type="time" style={S.input} value={form.saat}
+            onChange={e => setForm(f => ({ ...f, saat: e.target.value }))} />
+        </div>
+      </div>
+      <div style={S.formGroup}>
+        <div style={S.label}>Ödeme</div>
+        <div style={S.segmented}>
+          {["nakit", "kart"].map(tip => (
+            <button key={tip} onClick={() => setForm(f => ({ ...f, odeme: tip }))}
+              style={{ ...S.segBtn, ...(form.odeme === tip ? S.segActive : {}) }}>
+              {tip === "nakit" ? "💵 Nakit" : "💳 Kart"}
+            </button>
+          ))}
+        </div>
+      </div>
+      <div style={S.row2}>
+        <div>
+          <div style={S.label}>Başl. KM</div>
+          <input type="number" placeholder="km" style={S.input} value={form.baslKm}
+            onChange={e => setForm(f => ({ ...f, baslKm: e.target.value }))} />
+        </div>
+        <div>
+          <div style={S.label}>Bitiş KM</div>
+          <input type="number" placeholder="km" style={S.input} value={form.bitisKm}
+            onChange={e => setForm(f => ({ ...f, bitisKm: e.target.value }))} />
+        </div>
+      </div>
+      <div style={S.formGroup}>
+        <div style={S.label}>Not (opsiyonel)</div>
+        <input style={S.input} placeholder="Rota, müşteri notu..." value={form.aciklama}
+          onChange={e => setForm(f => ({ ...f, aciklama: e.target.value }))} />
+      </div>
+      <button onClick={kaydet} style={S.saveBtn}>✓ Seferi Kaydet</button>
+    </Modal>
+  );
+}
+
+function GiderModal({ store, update, onClose }) {
+  const [form, setForm] = useState({ tip: "yakit", tutar: "", aciklama: "", tarih: bugun(), siforId: store.profile.aktifSifor });
+  function kaydet() {
+    if (!form.tutar || parseFloat(form.tutar) <= 0) return;
+    update(s => { s.giderler = [...s.giderler, { ...form, id: Date.now() }]; });
+    onClose();
+  }
+  return (
+    <Modal title="💸 Gider Ekle" onClose={onClose}>
+      <div style={S.formGroup}>
+        <div style={S.label}>Gider Tipi</div>
+        <div style={S.tipGrid}>
+          {Object.entries(GIDER_TIPS).map(([k, v]) => (
+            <button key={k} onClick={() => setForm(f => ({ ...f, tip: k }))}
+              style={{ ...S.tipBtn, ...(form.tip === k ? { background: v.color + "33", borderColor: v.color, color: v.color } : {}) }}>
+              {v.emoji} {v.label}
+            </button>
+          ))}
+        </div>
+      </div>
+      <div style={S.row2}>
+        <div>
+          <div style={S.label}>Tutar (₺) *</div>
+          <input type="number" inputMode="decimal" placeholder="0.00" style={S.input} value={form.tutar}
+            onChange={e => setForm(f => ({ ...f, tutar: e.target.value }))} autoFocus />
+        </div>
+        <div>
+          <div style={S.label}>Not</div>
+          <input style={S.input} placeholder="Opsiyonel" value={form.aciklama}
+            onChange={e => setForm(f => ({ ...f, aciklama: e.target.value }))} />
+        </div>
+      </div>
+      <button onClick={kaydet} style={S.saveBtn}>✓ Kaydet</button>
+    </Modal>
+  );
+}
+
+function SiforModal({ store, update, onClose }) {
+  const [form, setForm] = useState({ ad: "", telefon: "" });
+  function kaydet() {
+    if (!form.ad.trim()) return;
+    update(s => {
+      const id = Date.now();
+      s.profile.siforler = [...(s.profile.siforler || []), { ...form, id }];
+    });
+    onClose();
+  }
+  return (
+    <Modal title="🧑‍✈️ Yeni Şoför" onClose={onClose}>
+      <div style={S.formGroup}>
+        <div style={S.label}>Şoför Adı *</div>
+        <input style={S.input} placeholder="Ad Soyad" value={form.ad}
+          onChange={e => setForm(f => ({ ...f, ad: e.target.value }))} autoFocus />
+      </div>
+      <div style={S.formGroup}>
+        <div style={S.label}>Telefon</div>
+        <input style={S.input} placeholder="05xx xxx xx xx" value={form.telefon}
+          onChange={e => setForm(f => ({ ...f, telefon: e.target.value }))} />
+      </div>
+      <button onClick={kaydet} style={S.saveBtn}>✓ Kaydet</button>
+    </Modal>
+  );
+}
+
+function ProfilModal({ store, update, onClose }) {
+  return (
+    <Modal title="⚙️ Hızlı Ayarlar" onClose={onClose}>
+      <div style={S.formGroup}>
+        <div style={S.label}>Plaka</div>
+        <input style={S.input} value={store.profile.plaka}
+          onChange={e => update(s => { s.profile.plaka = e.target.value; })} />
+      </div>
+      <div style={S.formGroup}>
+        <div style={S.label}>Mal Sahibi Payı: %{store.profile.malSahipOran}</div>
+        <input type="range" min={0} max={100} step={5} value={store.profile.malSahipOran}
+          onChange={e => update(s => { s.profile.malSahipOran = Number(e.target.value); })} />
+      </div>
+      <div style={S.formGroup}>
+        <div style={S.label}>Yövmiye (Cirodan): %{store.profile.yovmiyeOran}</div>
+        <input type="range" min={0} max={50} step={1} value={store.profile.yovmiyeOran}
+          onChange={e => update(s => { s.profile.yovmiyeOran = Number(e.target.value); })} />
+      </div>
+      <button onClick={onClose} style={S.saveBtn}>✓ Kapat</button>
+    </Modal>
+  );
+}
+
+// ─── SMALL COMPONENTS ─────────────────────────────────────────────────────────
+function Empty({ text }) {
+  return <div style={{ textAlign: "center", color: "#475569", padding: "28px 0", fontSize: 14 }}>{text}</div>;
+}
+
+// ─── STYLES ───────────────────────────────────────────────────────────────────
+const S = {
+  root: { minHeight: "100vh", background: "#ffffff", fontFamily: "'Syne',sans-serif", color: "#111111", maxWidth: 480, margin: "0 auto", paddingBottom: 24 },
+  header: { padding: "18px 14px 14px" },
+  headerRow: { display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 12 },
+  logo: { fontSize: 20, fontWeight: 800, letterSpacing: -0.5 },
+  plataBadge: { fontSize: 11, marginTop: 2, fontFamily: "'JetBrains Mono',monospace" },
+  miniStats: { display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 6 },
+  tabBar: { display: "flex", background: "#fff", borderBottom: "2px solid #111", position: "sticky", top: 0, zIndex: 10 },
+  tabBtn: { flex: 1, background: "none", border: "none", color: "#aaa", padding: "9px 2px", cursor: "pointer", display: "flex", flexDirection: "column", alignItems: "center", gap: 2, fontSize: 10, transition: "color 0.2s" },
+  tabActive: { color: "#111", borderBottom: "2px solid #111" },
+  content: { padding: "14px 12px", background: "#fff" },
+  secTitle: { fontSize: 11, fontWeight: 700, color: "#999", textTransform: "uppercase", letterSpacing: 1, marginBottom: 6 },
+  actionRow: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 },
+  addBtn: { background: "#111", color: "#fff", border: "none", borderRadius: 8, padding: "7px 14px", fontSize: 13, fontWeight: 800, cursor: "pointer", fontFamily: "'Syne',sans-serif" },
+  gpsBtn: { border: "1px solid", borderRadius: 8, padding: "6px 10px", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "'Syne',sans-serif" },
+  gpsBanner: { background: "#f0fdf4", border: "1px solid #bbf7d0", borderRadius: 8, padding: "8px 12px", marginBottom: 10, display: "flex", justifyContent: "space-between", flexWrap: "wrap", gap: 4 },
+  kmCard: { background: "#f9f9f9", border: "1px solid #e5e5e5", borderRadius: 10, padding: 10, marginBottom: 12 },
+  kmLabel: { fontSize: 10, color: "#999", marginBottom: 4, fontWeight: 700 },
+  kmInput: { width: "100%", background: "#fff", border: "1px solid #ddd", borderRadius: 6, padding: "7px 8px", color: "#111", fontSize: 13, fontFamily: "'JetBrains Mono',monospace" },
+  seferCard: { display: "flex", alignItems: "center", gap: 10, background: "#fafafa", border: "1px solid #e5e5e5", borderRadius: 10, padding: "10px 12px", marginBottom: 7 },
+  seferNo: { background: "#111", color: "#fff", borderRadius: 6, padding: "4px 7px", fontSize: 12, fontWeight: 800, fontFamily: "'JetBrains Mono',monospace", minWidth: 30, textAlign: "center" },
+  seferRow: { display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" },
+  seferSaat: { color: "#888", fontSize: 12, fontFamily: "'JetBrains Mono',monospace" },
+  seferAcik: { color: "#999", fontSize: 11, marginTop: 3 },
+  seferKm: { color: "#555", fontSize: 10, marginTop: 2, fontFamily: "'JetBrains Mono',monospace" },
+  seferTutar: { color: "#111", fontWeight: 800, fontSize: 15, fontFamily: "'JetBrains Mono',monospace" },
+  nakitBadge: { background: "#111", color: "#fff", borderRadius: 4, padding: "1px 6px", fontSize: 10, fontWeight: 700 },
+  kartBadge: { background: "#f0f0f0", color: "#333", borderRadius: 4, padding: "1px 6px", fontSize: 10, fontWeight: 700, border: "1px solid #ddd" },
+  silBtn: { background: "#fee2e2", border: "none", borderRadius: 5, color: "#dc2626", padding: "3px 7px", fontSize: 12, cursor: "pointer" },
+  yovmiyeCard: { background: "#f9f9f9", border: "1px solid #e5e5e5", borderRadius: 10, padding: "12px 14px", marginBottom: 12 },
+  giderCard: { display: "flex", alignItems: "center", gap: 10, background: "#fafafa", border: "1px solid #e5e5e5", borderRadius: 10, padding: "10px 12px", marginBottom: 7 },
+  giderEmoji: { width: 36, height: 36, borderRadius: 8, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 18 },
+  borcItem: { background: "#fafafa", border: "1px solid", borderRadius: 10, padding: "10px 12px", marginBottom: 7, display: "flex", alignItems: "center", gap: 10 },
+  formCard: { background: "#f9f9f9", border: "1px solid #e5e5e5", borderRadius: 12, padding: 14, marginBottom: 12 },
+  row2: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 10 },
+  formGroup: { marginBottom: 10 },
+  label: { fontSize: 11, color: "#777", marginBottom: 4, fontWeight: 600, display: "block" },
+  input: { width: "100%", background: "#fff", border: "1px solid #ddd", borderRadius: 7, padding: "9px 10px", color: "#111", fontSize: 14, outline: "none", fontFamily: "'Syne',sans-serif" },
+  select: { width: "100%", background: "#fff", border: "1px solid #ddd", borderRadius: 7, padding: "9px 10px", color: "#111", fontSize: 13, outline: "none" },
+  segmented: { display: "flex", gap: 8 },
+  segBtn: { flex: 1, background: "#f0f0f0", border: "1px solid #ddd", borderRadius: 7, color: "#888", padding: "8px", fontSize: 13, cursor: "pointer", fontFamily: "'Syne',sans-serif" },
+  segActive: { background: "#111", borderColor: "#111", color: "#fff" },
+  saveBtn: { width: "100%", background: "#111", color: "#fff", border: "none", borderRadius: 9, padding: "12px", fontSize: 15, fontWeight: 800, cursor: "pointer", fontFamily: "'Syne',sans-serif" },
+  tipGrid: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 },
+  tipBtn: { background: "#f0f0f0", border: "1px solid #ddd", borderRadius: 7, color: "#555", padding: "9px", fontSize: 13, cursor: "pointer", fontFamily: "'Syne',sans-serif" },
+  statBox: { background: "#f9f9f9", border: "1px solid #e5e5e5", borderRadius: 10, padding: "14px 12px", textAlign: "center" },
+  chartCard: { background: "#f9f9f9", border: "1px solid #e5e5e5", borderRadius: 10, padding: "12px", marginBottom: 10 },
+  chartTitle: { fontSize: 12, fontWeight: 700, color: "#888", marginBottom: 10 },
+  hesapCard: { background: "#f9f9f9", border: "1px solid #e5e5e5", borderRadius: 12, padding: "14px 16px", marginBottom: 12 },
+  payGrid: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 12 },
+  payBox: { background: "#fafafa", border: "1px solid", borderRadius: 12, padding: "14px 10px", textAlign: "center" },
+  nakit_kutu: { background: "#f9f9f9", border: "1px solid #e5e5e5", borderRadius: 10, padding: "12px 14px", marginBottom: 12 },
+  hr: { borderTop: "1px solid #e5e5e5", margin: "6px 0" },
+  resetBtn: { width: "100%", background: "transparent", border: "1px solid #ddd", borderRadius: 9, padding: "11px", fontSize: 14, color: "#dc2626", cursor: "pointer", fontFamily: "'Syne',sans-serif" },
+  overlay: { position: "fixed", inset: 0, background: "#0008", zIndex: 100, display: "flex", alignItems: "flex-end", justifyContent: "center" },
+  modalBox: { background: "#fff", border: "1px solid #e5e5e5", borderRadius: "16px 16px 0 0", padding: "0 14px 24px", width: "100%", maxWidth: 480, maxHeight: "85vh", overflowY: "auto" },
+  modalHeader: { display: "flex", justifyContent: "space-between", alignItems: "center", padding: "16px 0 12px", borderBottom: "1px solid #e5e5e5", marginBottom: 14 },
+  closeBtn: { background: "#f0f0f0", border: "none", borderRadius: 6, color: "#555", padding: "5px 10px", cursor: "pointer", fontSize: 14 },
+};
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+</script>
+</body>
+</html>
